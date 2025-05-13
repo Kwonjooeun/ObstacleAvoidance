@@ -1,0 +1,221 @@
+import numpy as np
+import gymnasium as gym
+from gymnasium import spaces
+import ray
+from ray import tune
+from ray.rllib.algorithms.sac import SACConfig
+from ray.tune.registry import register_env
+import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
+import math
+import time
+from typing import Dict, List, Tuple, Optional
+
+# 3D 환경에서 장애물 회피를 위한 환경 클래스
+class ObstacleAvoidanceEnv(gym.Env):
+    def __init__(self, env_config):
+        super(ObstacleAvoidanceEnv, self).__init__()
+
+        # 환경 설정 파라미터
+        self.max_obstacles = env_config.get("max_obstacles", 16)
+        self.current_max_obstacles = env_config.get("current_max_obstacles", 1)  # 커리큘럼 러닝용
+        self.max_steps = env_config.get("max_steps", 100)
+        self.step_size = env_config.get("step_size", 0.05)
+        self.collision_threshold = env_config.get("collision_threshold", 0.1)
+        self.goal_threshold = env_config.get("goal_threshold", 0.1)
+        self.obstacle_speed_range = env_config.get("obstacle_speed_range", (0.0, 0.05))
+
+        # 장애물 개수 분포 (지정되지 않으면 current_max_obstacles 사용)
+        self.obstacle_distribution = env_config.get("obstacle_distribution", None)
+        
+        # 시작점과 목표점 설정
+        self.start_position = np.array([0.0, 0.0, 0.0])
+        self.goal_position = np.array([1.0, 1.0, 1.0])
+        
+        # 현재 위치 초기화
+        self.current_position = self.start_position.copy()
+        self.steps_taken = 0
+        
+        # Action space: 3D 방향 벡터 (정규화됨)
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
+
+        # Observation space:
+        # [
+        #   무인기의 현재 위치(3), 
+        #   목표지점까지의 차이(3),
+        #   각 장애물 정보(16개): [x, y, z, 반지름, 속력, 진행방향(코스)]
+        # ]
+        obs_dim = 3 + 3 + self.max_obstacles * 6
+        self.observation_space = spaces.Box(low=-float('inf'), high=float('inf'), shape=(obs_dim,), dtype=np.float32)
+
+        # 장애물 정보
+        self.obstacles = []
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        
+        # 현재 위치 초기화
+        self.current_position = self.start_position.copy()
+        self.steps_taken = 0
+        
+        # 장애물 생성
+        self.obstacles = self._generate_obstacles()
+        
+        # 초기 관측 정보 반환
+        observation = self._get_observation()
+        info = self._get_info()
+        
+        return observation, info
+
+    def step(self, action):
+        self.steps_taken += 1
+        
+        # 액션 정규화
+        action = np.array(action, dtype=np.float32)
+        if np.linalg.norm(action) > 0:
+            action = action / np.linalg.norm(action)
+        
+        # 다음 위치 계산
+        next_position = self.current_position + action * self.step_size
+        
+        # # 장애물 위치 업데이트 (동적 장애물)
+        # self._update_obstacles()
+        
+        # 충돌 체크
+        collision = self._check_collision(next_position)
+        
+        # 보상 및 종료 조건 계산
+        reward, terminated, truncated = self._compute_reward(next_position, collision)
+        
+        # 위치 업데이트 (충돌이 아닌 경우)
+        if not collision:
+            self.current_position = next_position
+        
+        # 최대 스텝 수 초과 체크
+        if self.steps_taken >= self.max_steps:
+            truncated = True
+        
+        # 관측 정보 반환
+        observation = self._get_observation()
+        info = self._get_info()
+        
+        return observation, reward, terminated, truncated, info
+
+    def _generate_obstacles(self):
+        """무작위 장애물 생성 - 분포 지원"""
+        obstacles = []
+        
+        # 장애물 개수 결정
+        if self.obstacle_distribution:
+            # 분포에서 장애물 개수 샘플링
+            num_obstacles = np.random.choice(
+                list(self.obstacle_distribution.keys()),
+                p=list(self.obstacle_distribution.values())
+            )
+        else:
+            # 기존 방식: 1에서 현재 최대까지 균등 분포
+            num_obstacles = np.random.randint(0, self.current_max_obstacles + 1)
+        
+        for _ in range(num_obstacles):
+            # 장애물 위치는 0과 1 사이에서 무작위로 생성
+            x = np.random.uniform(0.2, 0.8)
+            y = np.random.uniform(0.2, 0.8)
+            z = np.random.uniform(0.2, 0.8)
+            
+            # 반지름은 0.05에서 0.15 사이로 설정
+            radius = np.random.uniform(0.05, 0.15)
+            
+            # 속력 설정 (0이면 정지, 양수면 동적)
+            speed = 0 #np.random.choice([0, np.random.uniform(*self.obstacle_speed_range)])
+            
+            # 진행방향(코스) 설정 (라디안)
+            course = np.random.uniform(0, 2*np.pi) if speed > 0 else 0
+            
+            obstacles.append({
+                "position": np.array([x, y, z]),
+                "radius": radius,
+                "speed": speed,
+                "course": course
+            })
+        
+        # 남은 장애물 슬롯을 제로 패딩으로 채우기
+        for _ in range(self.max_obstacles - num_obstacles):
+            obstacles.append({
+                "position": np.zeros(3),
+                "radius": 0,
+                "speed": 0,
+                "course": 0
+            })
+        
+        return obstacles
+
+    def _check_collision(self, position):
+        """장애물과의 충돌 여부 확인"""
+        for obstacle in self.obstacles:
+            if obstacle["radius"] > 0:  # 유효한 장애물인 경우
+                # 3D 거리 계산 (x,y만 고려하는 실린더 형태)
+                obstacle_pos = obstacle["position"]
+                dx = position[0] - obstacle_pos[0]
+                dy = position[1] - obstacle_pos[1]
+                dist_2d = np.sqrt(dx**2 + dy**2)
+                
+                # 장애물 반지름보다 거리가 작으면 충돌
+                if dist_2d < obstacle["radius"] + self.collision_threshold:
+                    return True
+        
+        return False        
+
+    def _compute_reward(self, next_position, collision):
+        """보상 및 종료 상태 계산"""
+        current_dist = np.linalg.norm(self.current_position - self.goal_position)
+        next_dist = np.linalg.norm(next_position - self.goal_position)
+        
+        # 목표 지점에 도달했는지 확인
+        goal_reached = next_dist < self.goal_threshold
+        
+        # 기본 보상: 목표에 가까워지면 양수, 멀어지면 음수
+        reward = current_dist - next_dist
+        
+        # 골 도달 보상
+        if goal_reached:
+            reward += 10.0
+            return reward, True, False
+        
+        # 충돌 패널티
+        if collision:
+            reward -= 5.0
+            return reward, False, True
+        
+        # 에너지 사용 패널티 (너무 긴 경로를 피하기 위해)
+        reward -= 0.01
+        
+        return reward, False, False        
+
+    def _get_observation(self):
+        """현재 상태에 대한 관측 데이터 생성"""
+        # 현재 위치
+        observation = np.copy(self.current_position)
+        
+        # 목표점까지의 상대적 위치 (E, N, U 차이)
+        goal_relative = self.goal_position - self.current_position
+        observation = np.concatenate([observation, goal_relative])
+        
+        # 장애물 정보
+        for obstacle in self.obstacles:
+            # 장애물 정보: 위치(3), 반지름(1), 속력(1), 코스(1)
+            obstacle_info = np.concatenate([
+                obstacle["position"],
+                [obstacle["radius"], obstacle["speed"], obstacle["course"]]
+            ])
+            observation = np.concatenate([observation, obstacle_info])
+        
+        return observation
+    
+    def _get_info(self):
+        """추가 정보(메타데이터) 반환"""
+        return {
+            "num_obstacles": len([o for o in self.obstacles if o["radius"] > 0]),
+            "distance_to_goal": np.linalg.norm(self.current_position - self.goal_position),
+            "collision": False,
+            "success": False
+        }        
