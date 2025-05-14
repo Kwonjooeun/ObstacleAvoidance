@@ -181,7 +181,7 @@ def standard_training(args):
         json.dump(serializable_config, f, indent=4)
     # 학습 실행
     print("\n=== 표준 학습 시작 (장애물 16개로 직접 훈련) ===")
-        restore_path = args.checkpoint if args.checkpoint else None
+    restore_path = args.checkpoint if args.checkpoint else None
     result = tune.run(
         "SAC",
         config=config,
