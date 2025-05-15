@@ -219,3 +219,66 @@ class ObstacleAvoidanceEnv(gym.Env):
             "collision": False,
             "success": False
         }        
+# 환경 시각화 함수
+def visualize_environment(env, step=0, save_path=None):
+    """환경 상태 시각화"""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 7))
+    
+    # Top view (X-Y plane)
+    ax1.set_title(f"Top View (Step {step})")
+    ax1.set_xlim(0, 1)
+    ax1.set_ylim(0, 1)
+    ax1.set_xlabel("X")
+    ax1.set_ylabel("Y")
+    
+    # Side view (X-Z plane)
+    ax2.set_title(f"Side View (Step {step})")
+    ax2.set_xlim(0, 1)
+    ax2.set_ylim(0, 1)
+    ax2.set_xlabel("X")
+    ax2.set_ylabel("Z")
+    
+    # 시작점 그리기
+    ax1.scatter(env.start_position[0], env.start_position[1], color='green', s=100, marker='o', label='Start')
+    ax2.scatter(env.start_position[0], env.start_position[2], color='green', s=100, marker='o')
+    
+    # 목표점 그리기
+    ax1.scatter(env.goal_position[0], env.goal_position[1], color='red', s=100, marker='x', label='Goal')
+    ax2.scatter(env.goal_position[0], env.goal_position[2], color='red', s=100, marker='x')
+    
+    # 현재 위치 그리기
+    ax1.scatter(env.current_position[0], env.current_position[1], color='blue', s=80, marker='*', label='Current')
+    ax2.scatter(env.current_position[0], env.current_position[2], color='blue', s=80, marker='*')
+    
+    # 장애물 그리기
+    for i, obstacle in enumerate(env.obstacles):
+        if obstacle["radius"] > 0:  # 유효한 장애물인 경우만
+            # Top view에 원형 장애물 그리기
+            circle = Circle((obstacle["position"][0], obstacle["position"][1]), 
+                          obstacle["radius"], color='gray', alpha=0.5)
+            ax1.add_patch(circle)
+            
+            # 속력이 있으면 화살표로 표시
+            if obstacle["speed"] > 0:
+                arrow_len = obstacle["speed"] * 5  # 화살표 길이 조정
+                dx = arrow_len * np.cos(obstacle["course"])
+                dy = arrow_len * np.sin(obstacle["course"])
+                ax1.arrow(obstacle["position"][0], obstacle["position"][1], 
+                        dx, dy, head_width=0.02, head_length=0.03, fc='r', ec='r')
+            
+            # Side view에 세로선으로 표시
+            ax2.vlines(obstacle["position"][0], 
+                     obstacle["position"][2] - obstacle["radius"], 
+                     obstacle["position"][2] + obstacle["radius"], 
+                     color='gray', alpha=0.5, linewidth=2)
+    
+    ax1.legend()
+    ax1.grid(True)
+    ax2.grid(True)
+    
+    if save_path:
+        plt.savefig(save_path)
+        plt.close()
+    else:
+        plt.tight_layout()
+        plt.show()
