@@ -182,28 +182,117 @@ def standard_training(args):
     # 학습 실행
     print("\n=== 표준 학습 시작 (장애물 16개로 직접 훈련) ===")
     restore_path = args.checkpoint if args.checkpoint else None
-    result = tune.run(
-        "SAC",
-        config=config,
-        stop={"training_iteration": args.iterations},
-        checkpoint_freq=args.iterations // 10,
-        checkpoint_at_end=True,
-        name=f"standard_training",
-        local_dir=file_uri,
-        restore=restore_path,
-        verbose=1
-    )
+    try:
+        tune.run(
+            "SAC",
+            config=config,
+            stop={"training_iteration": args.iterations},
+            checkpoint_freq=args.iterations // 10,
+            checkpoint_at_end=True,
+            name="standard_training",
+            local_dir=file_uri,
+            restore=restore_path,
+            verbose=1
+        )
+        print("Training completed successfully.")
+    except ValueError as e:
+        if "experiment_state" in str(e):
+            print("Note: Expected error occurred with ExperimentAnalysis. Continuing with direct checkpoint handling.")
+        else:
+            print(f"Unexpected error during training: {e}")
     
-    # 최종 체크포인트 저장
-    best_checkpoint = result.get_best_checkpoint(
-        metric="episode_reward_mean", 
-        mode="max"
-    )
+    # Directly process checkpoints without using ExperimentAnalysis
+    def find_best_checkpoint():
+        trials_dir = os.path.join(result_dir, "standard_training")
+        if not os.path.exists(trials_dir):
+            print(f"Error: Trials directory not found at {trials_dir}")
+            return None
+        
+        # Find trial directories
+        trial_dirs = [d for d in os.listdir(trials_dir) if d.startswith("SAC_")]
+        if not trial_dirs:
+            print(f"Error: No trial directories found in {trials_dir}")
+            return None
+        
+        # Process each trial to find the best checkpoint
+        import pandas as pd
+        best_checkpoint = None
+        best_reward = float('-inf')
+        
+        for trial_dir in trial_dirs:
+            trial_path = os.path.join(trials_dir, trial_dir)
+            progress_file = os.path.join(trial_path, "progress.csv")
+            
+            if os.path.exists(progress_file):
+                try:
+                    df = pd.read_csv(progress_file)
+                    if 'episode_reward_mean' in df.columns and len(df) > 0:
+                        # Find the highest reward
+                        max_reward = df['episode_reward_mean'].max()
+                        max_iter_row = df.loc[df['episode_reward_mean'].idxmax()]
+                        max_iter = int(max_iter_row['training_iteration'])
+                        
+                        # Look for checkpoint directories
+                        checkpoint_dirs = [d for d in os.listdir(trial_path) 
+                                         if d.startswith("checkpoint_")]
+                        
+                        if checkpoint_dirs:
+                            # Find checkpoint closest to best iteration
+                            checkpoint_iters = [int(c.split('_')[1]) for c in checkpoint_dirs]
+                            closest_iter = min(checkpoint_iters, key=lambda x: abs(x - max_iter))
+                            checkpoint_path = os.path.join(
+                                trial_path, f"checkpoint_{closest_iter:06d}"
+                            )
+                            
+                            # Check if the RLlib checkpoint file exists
+                            rllib_checkpoint = os.path.join(
+                                checkpoint_path, "policies", "default_policy", 
+                                "rllib_checkpoint.json"
+                            )
+                            
+                            if os.path.exists(rllib_checkpoint) and max_reward > best_reward:
+                                best_reward = max_reward
+                                best_checkpoint = checkpoint_path
+                except Exception as e:
+                    print(f"Warning: Error processing progress file for {trial_dir}: {e}")
+        
+        if best_checkpoint:
+            with open(os.path.join(result_dir, "checkpoint_info.txt"), 'w') as f:
+                f.write(f"Best checkpoint: {best_checkpoint}\n")
+                f.write(f"Best reward: {best_reward}\n")
+            
+            print(f"Found best checkpoint: {best_checkpoint}")
+            print(f"Best reward: {best_reward}")
+            return best_checkpoint
+        
+        # Fallback: use the latest checkpoint
+        latest_trial = sorted(trial_dirs)[-1]
+        trial_path = os.path.join(trials_dir, latest_trial)
+        checkpoint_dirs = [d for d in os.listdir(trial_path) 
+                           if d.startswith("checkpoint_")]
+        
+        if checkpoint_dirs:
+            latest_checkpoint = sorted(checkpoint_dirs)[-1]
+            checkpoint_path = os.path.join(trial_path, latest_checkpoint)
+            
+            # Verify the checkpoint has the expected files
+            rllib_checkpoint = os.path.join(
+                checkpoint_path, "policies", "default_policy", 
+                "rllib_checkpoint.json"
+            )
+            
+            if os.path.exists(rllib_checkpoint):
+                with open(os.path.join(result_dir, "checkpoint_info.txt"), 'w') as f:
+                    f.write(f"Latest checkpoint: {checkpoint_path}\n")
+                
+                print(f"Found latest checkpoint: {checkpoint_path}")
+                return checkpoint_path
+        
+        print("No valid checkpoints found.")
+        return None
     
-    # 체크포인트 정보 저장
-    with open(os.path.join(result_dir, "checkpoint_info.txt"), 'w') as f:
-        f.write(f"Best checkpoint: {best_checkpoint}\n")
-    
+    # Find the best checkpoint and clean up
+    best_checkpoint = find_best_checkpoint()
     ray.shutdown()
     return best_checkpoint
 
