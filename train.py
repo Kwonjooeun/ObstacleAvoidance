@@ -101,8 +101,12 @@ def sac_config_standard(num_obstacles=1, num_workers=4, use_gpu=True, gpu_ids=No
     #         # 실제 구현에서는 보통 이렇게 설정함
     #         "_available_gpus": [0],  # 0으로 설정해도 위에서 CUDA_VISIBLE_DEVICES로 제한된 GPU를 사용하게 됨
     #     })
+    config_dict = config.to_dict()
     
-    return config.to_dict()# 주어진 GPU ID를 설정하고 Ray 초기화
+    # 시각화 콜백 추가
+    config_dict["callbacks"] = VisualizationCallback
+    return config_dict
+
 def ray_init_with_gpu_filter(gpu_ids=None):
     """GPU ID를 제한하여 Ray 초기화"""
     if not ray.is_initialized():
@@ -130,8 +134,8 @@ def standard_training(args):
     # 결과 디렉토리 설정
     result_dir = f"results/standard_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     absolute_path = os.path.abspath(result_dir)
-    file_uri = f"file://{absolute_path}"
-    os.makedirs(result_dir, exist_ok=True)
+    # file_uri = f"file://{absolute_path}"
+    os.makedirs(absolute_path, exist_ok=True)
     # 설정 저장
     config = sac_config_standard(
         num_obstacles=16, 
@@ -177,7 +181,7 @@ def standard_training(args):
 
     # 사용 예시
     serializable_config = make_json_serializable(config)
-    with open(os.path.join(result_dir, "config.json"), 'w') as f:
+    with open(os.path.join(absolute_path, "config.json"), 'w') as f:
         json.dump(serializable_config, f, indent=4)
     # 학습 실행
     print("\n=== 표준 학습 시작 (장애물 16개로 직접 훈련) ===")
@@ -190,7 +194,7 @@ def standard_training(args):
             checkpoint_freq=args.iterations // 10,
             checkpoint_at_end=True,
             name="standard_training",
-            local_dir=file_uri,
+            local_dir=absolute_path,
             restore=restore_path,
             verbose=1
         )
