@@ -34,7 +34,7 @@ from ray.tune.registry import register_env
 from ray.rllib.utils import deep_update
 from ray.tune.utils import flatten_dict
 from obstacle_avoidance import ObstacleAvoidanceEnv
-from training_visualizer import TrainingVisualizer
+from training_visualizer import TrainingVisualizerCallback, create_visualizer_callback
 
 # SAC 알고리즘 구성 (표준 버전)
 def sac_config_standard(num_obstacles=1, num_workers=4, use_gpu=True, gpu_ids=None):
@@ -353,19 +353,14 @@ def standard_training(args):
         return ObstacleAvoidanceEnv(env_config)
     
     # 시각화 객체 생성
-    visualizer = TrainingVisualizer(
+    visualizer_callback = create_visualizer_callback(
         env_creator=env_creator,
-        config=config,
-        result_dir=absolute_path,
-        visualization_interval=viz_interval,
-        max_visualizations=50,
+        env_config=config["env_config"],
+        result_dir=result_dir,
+        viz_interval=viz_interval,
+        max_viz=50,
         save_gif=False
     )
-    
-    # 콜백 함수 설정
-    callbacks = {
-        "on_train_result": visualizer.on_train_result
-    }
     
     # 학습 실행
     print("\n=== 표준 학습 시작 (장애물 16개로 직접 훈련) ===")
@@ -380,7 +375,7 @@ def standard_training(args):
         local_dir=absolute_path,
         restore=restore_path,
         verbose=1,
-        callbacks=callbacks
+        callbacks=[visualizer_callback]
     )
     
     # 최종 체크포인트 저장
